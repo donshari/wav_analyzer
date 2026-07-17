@@ -1,5 +1,7 @@
 use hound;
 use clap::Parser;
+use walkdir::WalkDir;
+use rayon::prelude::*;
 
 #[derive(Parser)]
 struct Args {
@@ -15,6 +17,7 @@ struct AnalysisResult {
     sample_count: usize,
     peek: i32,
     rms: f64,
+    warnings: Vec<String>
 }
 
 fn analyze(path: &str) -> Result<AnalysisResult, String> {
@@ -31,6 +34,17 @@ fn analyze(path: &str) -> Result<AnalysisResult, String> {
     let sum_of_squares: f64 = samples.iter().map(|s| (*s as f64).powi(2)).sum();
     let rms = (sum_of_squares / samples.len() as f64).sqrt();
 
+    let mut warnings: Vec<String> = Vec::new();
+
+    if rms < 1.0 {
+        warnings.push("無音の可能性があります".to_string())
+    }
+
+    // 32767 * 95% = 31128
+    if peek > 31128 {
+        warnings.push("クリップの可能性があります".to_string())
+    }
+
     Ok(AnalysisResult {
         sample_rate: spec.sample_rate,
         channels: spec.channels,
@@ -38,6 +52,7 @@ fn analyze(path: &str) -> Result<AnalysisResult, String> {
         sample_count: samples.len(),
         peek,
         rms,
+        warnings,
     })
 }
 
@@ -48,6 +63,9 @@ fn print_text(result: &AnalysisResult) {
     println!("サンプル数: {}", result.sample_count);
     println!("ピーク値: {}", result.peek);
     println!("RMS: {}", result.rms);
+    for w in &result.warnings {
+        println!("⚠ {}", w);
+    }
 }
 
 fn print_json(result: &AnalysisResult) {
@@ -57,20 +75,40 @@ fn print_json(result: &AnalysisResult) {
     println!("  \"bits_per_sample\": {},", result.bits_per_sample);
     println!("  \"samples_count\": {},", result.sample_count);
     println!("  \"peek\": {},", result.peek);
-    println!("  \"rms\": {}", result.rms);
+    println!("  \"rms\": {},", result.rms);
+    let warnings_json = result.warnings.iter()
+        .map(|w| format!("\"{}\"", w))
+        .collect::<Vec<String>>()
+        .join(", ");
+    println!("  \"warnings\": [{}]", warnings_json);
     println!("}}");
+}
+
+fn find_wav_files(dir: &str) -> Vec<String> {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().to_string_lossy().to_string().ends_with(".wav"))
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect()
 }
 
 fn main() {
     let args = Args::parse();
 
-    match analyze(&args.path) {
-        Ok(result) => {
-            match args.format.as_str() {
-                "json" => print_json(&result),
-                _ => print_text(&result),
-            }
-        },
-        Err(e) => println!("エラー: {}", e),
-    }
+    let files = find_wav_files(&args.path);
+    println!("見つかったWAVファイル数: {}", files.len());
+
+    files.par_iter().for_each(|path| {
+        match analyze(&path) {
+            Ok(result) => {
+                println!("--- {} ---", path);
+                match args.format.as_str() {
+                    "json" => print_json(&result), 
+                    _ => print_text(&result),
+                }
+            },
+            Err(e) => println!("エラー: {}", e),
+        }
+    });
 }
